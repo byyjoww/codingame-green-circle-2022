@@ -26,7 +26,7 @@ public class Game
     private InputReader reader = default;
 
     public IPhase Phase => phase;
-    public IEnumerable<Application> Apps => Apps;
+    public IEnumerable<Application> Apps => apps;
     public IEnumerable<Action> Actions => actions;
     public GamePlayer Player { get; private set; }
     public GameOpponent Opponent { get; private set; }
@@ -55,7 +55,7 @@ public class Game
 
     public void Execute()
     {
-        LogPhaseInfo();
+        // LogPhaseInfo();
         phase.Run(this);
     }
 
@@ -83,21 +83,27 @@ public class MovePhase : PhaseBase
 
     public override void Run(Game _game)
     {
-        if (!TryFilterForPursuableApps(_game, out IEnumerable<Application> _pursuable))
+        if (!TryGetPursuableApps(_game, out IEnumerable<Application> _pursuable))
         {
-            // no available desks with any needed resources
-            Random();
+            Terminal.Log($"No pursuable applications");
+            Random(_game);
             return;
         }
 
-        var bestAppToPursue = GetBestApplicationToPursue(_pursuable);
-        var bestDesk = GetBestDeskToMove(bestAppToPursue);
-        Move(bestDesk);
+        Application bestAppToPursue = GetBestApplicationToPursue(_pursuable);
+        EDesk bestDesk = GetBestDeskToMove(_game, bestAppToPursue);
+        LogDecision(_pursuable, bestAppToPursue, bestDesk);
+        Move(_game, bestDesk);
     }
 
-    private bool TryFilterForPursuableApps(Game _game, out IEnumerable<Application> _pursuable)
+    private bool TryGetPursuableApps(Game _game, out IEnumerable<Application> _pursuable)
     {
-        _pursuable = _game.Apps.Where(x => !x.CanRelease(_game.Actions)); // if we can already release that app, we dont need to pursue it (TODO: check if we can improve the release by using good skills instead of shoddy skills)
+        // If we can already release that app, we dont need to pursue it
+        // TODO: check if we can improve the release by using good skills instead of shoddy skills
+        _pursuable = _game.Apps
+            .Where(x => !x.CanRelease(_game.Actions))
+            .Where(x => x.Costs.Any(x => IsAvailable(_game, x.Desk)))
+            .ToList();
         return _pursuable.Count() > 0;
     }
 
@@ -106,14 +112,40 @@ public class MovePhase : PhaseBase
         return _pursuable.First();
     }
 
-    private EDesk GetBestDeskToMove(Application _bestApplicationToPursue)
+    private EDesk GetBestDeskToMove(Game _game, Application _bestApplicationToPursue)
     {
-        return _bestApplicationToPursue.Costs.First().Desk;
+        return _bestApplicationToPursue.Costs
+            .Where(x => IsAvailable(_game, x.Desk))
+            .First()
+            .Desk;
     }
 
-    protected void Move(EDesk _desk)
+    private bool IsAvailable(Game _game, EDesk _desk)
     {
+        IPlayer[] players = new IPlayer[] { _game.Player, _game.Opponent };
+        foreach (var player in players)
+        {
+            if (player.Desk == _desk) { return false; }
+        }
+        return true;
+    }
+
+    protected void Move(Game _game, EDesk _desk)
+    {
+        if (!_game.Actions.Any(x => x.Value == $"MOVE {(int)_desk}")) 
+        {
+            Terminal.LogArray($"Available Actions:", _game.Actions.Select(x => x.Value));
+            throw new System.Exception($"can't move to desk {_desk}"); 
+        }
+        Terminal.Log($"Moving to desk {_desk}");
         Terminal.Command($"MOVE {(int)_desk}");
+    }
+
+    private void LogDecision(IEnumerable<Application> _pursuable, Application _bestApplicationToPursue, EDesk _bestDesk)
+    {
+        Terminal.LogArray($"Pursuable Applications:", _pursuable.Select(x => x.Id.ToString()));
+        Terminal.Log($"Best Application: {_bestApplicationToPursue.Id.ToString()}");
+        Terminal.Log($"Best Desk: {_bestDesk.ToString()}");
     }
 }
 
@@ -123,20 +155,44 @@ public class ReleasePhase : OptionalPhase
 
     public override void Run(Game _game)
     {
-        Random();
+        if (!TryGetBestApplicationToRelease(_game, out Application? _app))
+        {
+            Terminal.Log($"No releasable applications");
+            Random(_game);
+            return;
+        }
+
+        Release(_game, _app.Value);
     }
 
-    protected void Release(Application _app)
+    private bool TryGetBestApplicationToRelease(Game _game, out Application? _app)
     {
+        _app = _game.Apps.FirstOrDefault(x => x.CanRelease(_game.Actions));
+        return _app.HasValue;
+    }
+
+    protected void Release(Game _game, Application _app)
+    {
+        if (!_app.CanRelease(_game.Actions)) 
+        {
+            Terminal.LogArray($"Available Actions:", _game.Actions.Select(x => x.Value));
+            throw new System.Exception($"can't release app {_app.Id}"); 
+        }
+        Terminal.Log($"Releasing app {_app.Id}");
         Terminal.Command($"RELEASE {_app.Id}");
     }
 }
 
 public abstract class OptionalPhase : PhaseBase
 {
-    protected void Wait()
+    protected void Wait(Game _game)
     {
-        Terminal.Command("WAIT waiting...");
+        if (!_game.Actions.Any(x => x.Value == "WAIT")) 
+        {
+            Terminal.LogArray($"Available Actions:", _game.Actions.Select(x => x.Value));
+            throw new System.Exception("can't wait"); 
+        }
+        Terminal.Command("WAIT wait...");
     }
 }
 
@@ -146,9 +202,14 @@ public abstract class PhaseBase : IPhase
 
     public abstract void Run(Game _game);
 
-    protected void Random()
+    protected void Random(Game _game)
     {
-        Terminal.Command("RANDOM idk what to do...");
+        if (!_game.Actions.Any(x => x.Value == "RANDOM")) 
+        {
+            Terminal.LogArray($"Available Actions:", _game.Actions.Select(x => x.Value));
+            throw new System.Exception("can't random"); 
+        }
+        Terminal.Command("RANDOM idk...");
     }
 }
 
