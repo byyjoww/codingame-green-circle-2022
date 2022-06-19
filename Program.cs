@@ -127,7 +127,7 @@ public interface IPhase
 
 public interface IPlayer
 {
-    List<Card> Cards { get; }
+    IEnumerable<Card> Cards { get; }
     IEnumerable<Card> Automated { get; }
     int PlayerPermanentDailyRoutineCards { get; set; }
     int PlayerPermanentArchitectureStudyCards { get; set; }
@@ -137,7 +137,8 @@ public interface IPlayer
 
 public class GamePlayer : IPlayer
 {
-    public Hand Hand { get; set; }
+    public IEnumerable<Card> Hand { get; set; }
+    public IEnumerable<Card> Deck { get; set; }
     public IEnumerable<Card> Discard { get; set; }    
     public IEnumerable<Card> Automated { get; set; }
     public int PlayerPermanentDailyRoutineCards { get; set; }
@@ -145,11 +146,12 @@ public class GamePlayer : IPlayer
     public EDesk Desk { get; set; }
     public int Score { get; set; }
 
-    public List<Card> Cards => Hand.Cards.Concat(Discard).ToList();
+    public IEnumerable<Card> Cards => Hand.Concat(Discard).Concat(Deck).ToList();
 
     public GamePlayer()
     {
-        this.Hand = new Hand();
+        this.Hand = new Card[0];
+        this.Deck = new Card[0];
         this.Discard = new Card[0];
         this.Automated = new Card[0];
         this.Desk = (EDesk)(-1);
@@ -161,7 +163,7 @@ public class GamePlayer : IPlayer
 
 public class GameOpponent : IPlayer
 {
-    public List<Card> Cards { get; set; }
+    public IEnumerable<Card> Cards { get; set; }
     public IEnumerable<Card> Automated { get; set; }
     public int PlayerPermanentDailyRoutineCards { get; set; }
     public int PlayerPermanentArchitectureStudyCards { get; set; }
@@ -187,7 +189,7 @@ public class Hand
 
 public struct Card
 {
-    public ECard Desk { get; set; }
+    public ECard Name { get; set; }
 
     public enum ECard
     {
@@ -208,7 +210,7 @@ public struct Card
         var cards = new List<Card>();
         for (int i = 0; i < int.Parse(_count); i++)
         {
-            cards.Add(new Card { Desk = _desk });
+            cards.Add(new Card { Name = _desk });
         }
         return cards;
     }
@@ -319,9 +321,6 @@ public class InputReader
 
     public void ReadCards(GamePlayer _player, GameOpponent _opponent)
     {
-        _player.Hand.Cards.Clear();
-        _opponent.Cards.Clear();
-
         int cardLocationsCount = int.Parse(Terminal.Read());
         for (int i = 0; i < cardLocationsCount; i++)
         {
@@ -340,32 +339,36 @@ public class InputReader
             cards.AddRange(Card.Parse(Card.ECard.BONUS, inputs[9]));
             cards.AddRange(Card.Parse(Card.ECard.TECHNICAL_DEBT, inputs[10]));
 
+            Terminal.Log($"LOCATION: {cardsLocation}");
+            Terminal.Log($"CARDS:");
+            foreach (var card in cards)
+            {
+                Terminal.Log($"CARD: {card.Name}");
+            }
+
             switch (cardsLocation)
             {
                 case "HAND":
-                    _player.Hand.Cards.AddRange(new Card[0]);
+                    _player.Hand = cards;
                     break;
                 case "DRAW":
-                    var draw = new Card();
-                    _player.Hand.Cards.Add(draw);
-                    _player.Hand.LastDraw = draw;
+                    _player.Deck = cards;
                     break;
                 case "DISCARD":
-                    _player.Discard = new Card[0];
+                    _player.Discard = cards;
                     break;
                 case "OPPONENT_CARDS":
-                    _opponent.Cards.AddRange(new Card[0]);
+                    _opponent.Cards = cards;
                     break;
                 case "AUTOMATED":
-                    _player.Automated = new Card[0];
+                    _player.Automated = cards;
                     break;
                 case "OPPONENT_AUTOMATED":
-                    _opponent.Automated = new Card[0];
+                    _opponent.Automated = cards;
                     break;
                 default:
-                    Terminal.Log("Received unknown card location");
-                    break;
-            }
+                    throw new System.Exception($"Received unknown card location: {cardsLocation}");
+            }            
         }
     }
 
@@ -377,7 +380,7 @@ public class InputReader
         {
             var action = new Action { Value = Terminal.Read() };
             _actions.Add(action);
-            Terminal.Log($"POSSIBLE_MOVE: {action.Value}");
+            // Terminal.Log($"POSSIBLE_MOVE: {action.Value}");
         }
     }
 }
