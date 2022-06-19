@@ -55,7 +55,25 @@ public class Game
 
     public void Execute()
     {
+        LogPhaseInfo();
         phase.Run(this);
+    }
+
+    private void LogPhaseInfo()
+    {
+        Terminal.Log($"Phase: {Phase.Name}");
+        Terminal.LogArray($"Available Actions:", Actions.Select(x => x.Value));
+        Terminal.Log($"Player Info (Score: {Player.Score})");
+        Terminal.LogArray($"- Hand:", Player.Hand.Select(x => x.Name.ToString()));
+        Terminal.LogArray($"- Deck:", Player.Deck.Select(x => x.Name.ToString()));
+        Terminal.LogArray($"- Discard:", Player.Discard.Select(x => x.Name.ToString()));
+        Terminal.Log($"Opponent Info (Score: {Opponent.Score})");
+        Terminal.LogArray($"- Cards:", Opponent.Cards.Select(x => x.Name.ToString()));
+        Terminal.Log($"Applications:");
+        foreach (var app in apps)
+        {
+            Terminal.LogArray($"- {app.Type} {app.Id}", app.Costs.Select(x => $"x{x.Value} {x.Desk}"));
+        }
     }
 }
 
@@ -65,11 +83,35 @@ public class MovePhase : PhaseBase
 
     public override void Run(Game _game)
     {
-        
-        Random();
+        if (!TryFilterForPursuableApps(_game, out IEnumerable<Application> _pursuable))
+        {
+            // no available desks with any needed resources
+            Random();
+            return;
+        }
+
+        var bestAppToPursue = GetBestApplicationToPursue(_pursuable);
+        var bestDesk = GetBestDeskToMove(bestAppToPursue);
+        Move(bestDesk);
     }
 
-    public void Move(EDesk _desk)
+    private bool TryFilterForPursuableApps(Game _game, out IEnumerable<Application> _pursuable)
+    {
+        _pursuable = _game.Apps.Where(x => !x.CanRelease(_game.Actions)); // if we can already release that app, we dont need to pursue it (TODO: check if we can improve the release by using good skills instead of shoddy skills)
+        return _pursuable.Count() > 0;
+    }
+
+    private Application GetBestApplicationToPursue(IEnumerable<Application> _pursuable)
+    {
+        return _pursuable.First();
+    }
+
+    private EDesk GetBestDeskToMove(Application _bestApplicationToPursue)
+    {
+        return _bestApplicationToPursue.Costs.First().Desk;
+    }
+
+    protected void Move(EDesk _desk)
     {
         Terminal.Command($"MOVE {(int)_desk}");
     }
@@ -84,7 +126,7 @@ public class ReleasePhase : OptionalPhase
         Random();
     }
 
-    public void Release(Application _app)
+    protected void Release(Application _app)
     {
         Terminal.Command($"RELEASE {_app.Id}");
     }
@@ -92,7 +134,7 @@ public class ReleasePhase : OptionalPhase
 
 public abstract class OptionalPhase : PhaseBase
 {
-    public void Wait()
+    protected void Wait()
     {
         Terminal.Command("WAIT waiting...");
     }
@@ -104,7 +146,7 @@ public abstract class PhaseBase : IPhase
 
     public abstract void Run(Game _game);
 
-    public void Random()
+    protected void Random()
     {
         Terminal.Command("RANDOM idk what to do...");
     }
@@ -181,12 +223,6 @@ public class GameOpponent : IPlayer
     }
 }
 
-public class Hand
-{
-    public List<Card> Cards { get; set; } = new List<Card>();
-    public Card? LastDraw { get; set; } = null;
-}
-
 public struct Card
 {
     public ECard Name { get; set; }
@@ -220,23 +256,24 @@ public struct Application
 {
     public string Type { get; set; }
     public int Id { get; set; }
-    public Cost[] Costs { get; set; }
+    public IEnumerable<Cost> Costs { get; set; }
 
-    public bool CanRelease(string[] _possibleActions)
+    public bool CanRelease(IEnumerable<Action> _possibleActions)
     {
-        return _possibleActions.Contains($"RELEASE {Id}");
+        return _possibleActions.Select(x => x.Value).Contains($"RELEASE {Id}");
     }
 }
 
 public struct Cost
 {
-    public Card.ECard Desk { get; set; }
+    public EDesk Desk { get; set; }
     public int Value { get; set; }
 
-    public Cost(Card.ECard _desk, string _raw)
+    public static IEnumerable<Cost> Parse(EDesk _desk, string _count)
     {
-        this.Desk = _desk;
-        this.Value = int.Parse(_raw);
+        int costNum = int.Parse(_count);
+        if (costNum <= 0) { return new Cost[0]; }
+        return new Cost[] { new Cost { Desk = _desk, Value = costNum } };
     }
 }
 
@@ -287,21 +324,21 @@ public class InputReader
         for (int i = 0; i < numOfApps; i++)
         {
             inputs = Terminal.Read().Split(' ');
+            List<Cost> costs = new List<Cost>();
+            costs.AddRange(Cost.Parse(EDesk.TRAINING, inputs[2]));
+            costs.AddRange(Cost.Parse(EDesk.CODING, inputs[3]));
+            costs.AddRange(Cost.Parse(EDesk.DAILY_ROUTINE, inputs[4]));
+            costs.AddRange(Cost.Parse(EDesk.TASK_PRIORITIZATION, inputs[5]));
+            costs.AddRange(Cost.Parse(EDesk.ARCHITECTURE_STUDY, inputs[6]));
+            costs.AddRange(Cost.Parse(EDesk.CONTINUOUS_DELIVERY, inputs[7]));
+            costs.AddRange(Cost.Parse(EDesk.CODE_REVIEW, inputs[8]));
+            costs.AddRange(Cost.Parse(EDesk.REFACTORING, inputs[9]));
+
             Application app = new Application
             {
                 Type = inputs[0],
                 Id = int.Parse(inputs[1]),
-                Costs = new Cost[]
-                {
-                    new Cost(Card.ECard.TRAINING, inputs[2]),
-                    new Cost(Card.ECard.CODING, inputs[3]),
-                    new Cost(Card.ECard.DAILY_ROUTINE, inputs[4]),
-                    new Cost(Card.ECard.TASK_PRIORITIZATION, inputs[5]),
-                    new Cost(Card.ECard.ARCHITECTURE_STUDY, inputs[6]),
-                    new Cost(Card.ECard.CONTINUOUS_DELIVERY, inputs[7]),
-                    new Cost(Card.ECard.CODE_REVIEW, inputs[8]),
-                    new Cost(Card.ECard.REFACTORING, inputs[9]),
-                }
+                Costs = costs,
             };
             _apps.Add(app);
         }
@@ -338,13 +375,6 @@ public class InputReader
             cards.AddRange(Card.Parse(Card.ECard.REFACTORING, inputs[8]));
             cards.AddRange(Card.Parse(Card.ECard.BONUS, inputs[9]));
             cards.AddRange(Card.Parse(Card.ECard.TECHNICAL_DEBT, inputs[10]));
-
-            Terminal.Log($"LOCATION: {cardsLocation}");
-            Terminal.Log($"CARDS:");
-            foreach (var card in cards)
-            {
-                Terminal.Log($"CARD: {card.Name}");
-            }
 
             switch (cardsLocation)
             {
@@ -387,7 +417,6 @@ public class InputReader
 
 public struct Action
 {
-
     // In the first league: RANDOM | MOVE <zoneId> | RELEASE <applicationId> | WAIT;
     // In later leagues: | GIVE <cardType> | THROW <cardType> | TRAINING | CODING | DAILY_ROUTINE | TASK_PRIORITIZATION <cardTypeToThrow> <cardTypeToTake> | ARCHITECTURE_STUDY | CONTINUOUS_DELIVERY <cardTypeToAutomate> | CODE_REVIEW | REFACTORING;
     public string Value { get; set; }
@@ -398,6 +427,11 @@ public class Terminal
     public static void Log(string _message)
     {
         Console.Error.WriteLine(_message);
+    }
+
+    public static void LogArray(string _message, IEnumerable<object> _array)
+    {
+        Log($"{_message}: [{string.Join(", ", _array)}]");
     }
 
     public static void Command(string _message)
