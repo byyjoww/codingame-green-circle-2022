@@ -41,6 +41,8 @@ public class Game
         {
             new MovePhase(),
             new ReleasePhase(),
+            new PlayCardPhase(),
+            new GiveCardPhase(),
         });
     }
 
@@ -62,13 +64,13 @@ public class Game
     private void LogPhaseInfo()
     {
         Terminal.Log($"Phase: {Phase.Name}");
-        Terminal.LogArray($"Available Actions:", Actions.Select(x => x.Value));
+        Terminal.LogArray($"Available Actions", Actions.Select(x => x.Value));
         Terminal.Log($"Player Info (Score: {Player.Score})");
-        Terminal.LogArray($"- Hand:", Player.Hand.Select(x => x.Name.ToString()));
-        Terminal.LogArray($"- Deck:", Player.Deck.Select(x => x.Name.ToString()));
-        Terminal.LogArray($"- Discard:", Player.Discard.Select(x => x.Name.ToString()));
+        Terminal.LogArray($"- Hand", Player.Hand.Select(x => x.Name.ToString()));
+        Terminal.LogArray($"- Deck", Player.Deck.Select(x => x.Name.ToString()));
+        Terminal.LogArray($"- Discard", Player.Discard.Select(x => x.Name.ToString()));
         Terminal.Log($"Opponent Info (Score: {Opponent.Score})");
-        Terminal.LogArray($"- Cards:", Opponent.Cards.Select(x => x.Name.ToString()));
+        Terminal.LogArray($"- Cards", Opponent.Cards.Select(x => x.Name.ToString()));
         Terminal.Log($"Applications:");
         foreach (var app in apps)
         {
@@ -82,134 +84,45 @@ public class MovePhase : PhaseBase
     public override EPhase Name => EPhase.MOVE;
 
     public override void Run(Game _game)
-    {
-        var totalMana = _game.Player.Hand.SelectMany(x => x.GetProvidedMana());
-        if (!TryGetPursuableApps(_game, totalMana, out Dictionary <Application, IEnumerable<Cost>> _pursuable))
+    {        
+        if (!TryGetPursuableApps(_game, out Dictionary<Application, IEnumerable<Cost>> _pursuable))
         {
             Terminal.Log($"No pursuable applications");
             Random(_game);
             return;
         }
 
-        var bestAppToPursue = GetBestApplicationToPursue(_pursuable);
+        var bestAppToPursue = GetBestApplicationToPursue(_game, _pursuable);
         EDesk bestDesk = GetBestDeskToMove(_game, bestAppToPursue);
         LogDecision(_pursuable, bestAppToPursue, bestDesk);
         Move(_game, bestDesk);
     }
 
-    private bool TryGetPursuableApps(Game _game, IEnumerable<IMana> _mana, out Dictionary<Application, IEnumerable<Cost>> _pursuable)
+    private bool TryGetPursuableApps(Game _game, out Dictionary<Application, IEnumerable<Cost>> _pursuable)
     {
-        // If we can already release that app, we dont need to pursue it
-        // TODO: check if we can improve the release by using good skills instead of shoddy skills
-        var apps = _game.Apps
-            .Where(x => !x.CanRelease(_game.Actions))
-            .Where(x => x.Costs.Any(x => IsAvailable(_game, x.Desk)))
-            .ToDictionary(x => x, y => y.Costs);
+        var mana = _game.Player.AvailableMana();
+        mana.Remove(EMana.WILDCARD);
+        mana.Remove(EMana.SHODDY);
 
-        _pursuable = apps
-            .ToDictionary(x => x.Key, y => ExcludeAvailableMana(y, _mana))
+        _pursuable = _game.Apps
+            .Where(x => !x.CanReleaseBasedOnMana(mana))
+            .ToDictionary(x => x, y => y.CostExcludingAvailableMana(mana))
             .Where(x => x.Value.Count() > 0)
             .Where(x => x.Value.Any(x => IsAvailable(_game, x.Desk)))
             .ToDictionary(x => x.Key, y => y.Value);
 
-        LogPursuableCalculation(_game, apps, _pursuable);
+        // LogPursuableCalculation(_game, _pursuable);
         return _pursuable.Count() > 0;
-    }
-
-    private IEnumerable<Cost> ExcludeAvailableMana(KeyValuePair<Application, IEnumerable<Cost>> _total, IEnumerable<IMana> _mana)
-    {
-        Dictionary<EMana, int> specificMana = new Dictionary<EMana, int>();
-        void AddToDictionary(IMana _mana)
-        {
-            if (_mana.Value > 0)
-            {
-                if (specificMana.ContainsKey(_mana.Name)) { specificMana[_mana.Name] += _mana.Value; }
-                else { specificMana.Add(_mana.Name, _mana.Value); }
-            }
-        }
-        _mana.Where(x => x is Mana).ToList().ForEach(x => AddToDictionary(x));
-        int wildcardMana = _mana.Where(x => x is WildcardMana).Sum(x => x.Value);        
-        int shoddyMana = _mana.Where(x => x is ShoddyMana).Sum(x => x.Value);
-
-        var loggableSpecificMana = new Dictionary<EMana, int>(specificMana);
-        int loggableWildcardMana = wildcardMana;
-        int loggableShoddyMana = shoddyMana;
-
-        // Deduct specific mana first
-        var newCostsMinusSpecific = new List<Cost>();
-        foreach (var cost in _total.Value)
-        {
-            var m = Enum.Parse<EMana>(cost.Desk.ToString());
-            if (specificMana.ContainsKey(m))
-            {
-                int toRemove = Math.Min(specificMana[m], cost.Value);
-                int newCost = cost.Value - toRemove;
-                if (newCost > 0) 
-                {
-                    newCostsMinusSpecific.Add(new Cost 
-                    {
-                        Desk = cost.Desk,
-                        Value = newCost,
-                    });
-                }
-
-                specificMana[m] -= toRemove;
-                if (specificMana[m] <= 0)
-                {
-                    specificMana.Remove(m);
-                }
-            }
-            else
-            {
-                newCostsMinusSpecific.Add(new Cost
-                {
-                    Desk = cost.Desk,
-                    Value = cost.Value,
-                });
-            }
-        }
-
-        // Deduct wildcard mana next
-        var newCostsMinusSpecificMinusWildcard = new List<Cost>();  
-        foreach (var cost in newCostsMinusSpecific)
-        {
-            int toRemove = Math.Min(wildcardMana, cost.Value);
-            int newCost = cost.Value - toRemove;
-            if (newCost > 0)
-            {
-                newCostsMinusSpecificMinusWildcard.Add(new Cost
-                {
-                    Desk = cost.Desk,
-                    Value = newCost,
-                });
-            }
-            wildcardMana -= toRemove;
-        }
-
-        // Deduct shoddy mana next
-        var newCostsMinusSpecificMinusWildcardMinusShoddy = new List<Cost>();
-        foreach (var cost in newCostsMinusSpecificMinusWildcard)
-        {
-            int toRemove = Math.Min(shoddyMana, cost.Value);
-            int newCost = cost.Value - toRemove;
-            if (newCost > 0)
-            {
-                newCostsMinusSpecificMinusWildcardMinusShoddy.Add(new Cost
-                {
-                    Desk = cost.Desk,
-                    Value = newCost,
-                });
-            }
-            shoddyMana -= toRemove;
-        }
-
-        // LogManaCalculation(_total, loggableSpecificMana, loggableWildcardMana, loggableShoddyMana, newCostsMinusSpecific, newCostsMinusSpecificMinusWildcard, newCostsMinusSpecificMinusWildcardMinusShoddy);
-        return newCostsMinusSpecificMinusWildcardMinusShoddy;
     }    
 
-    private KeyValuePair<Application, IEnumerable<Cost>> GetBestApplicationToPursue(Dictionary<Application, IEnumerable<Cost>> _pursuable)
+    private KeyValuePair<Application, IEnumerable<Cost>> GetBestApplicationToPursue(Game _game, Dictionary<Application, IEnumerable<Cost>> _pursuable)
     {
-        return _pursuable.First();
+        var best = _pursuable
+            .OrderBy(x => x.Key.RequiredShoddyMana(_game.Player.AvailableMana()))
+            .ThenByDescending(x => x.Key.Costs.Where(x => IsSafeSpot(_game, x)).Count());
+
+        LogBestApplicationCalculation(_game, best);
+        return best.First();
     }
 
     private EDesk GetBestDeskToMove(Game _game, KeyValuePair<Application, IEnumerable<Cost>> _bestApplicationToPursue)
@@ -222,10 +135,23 @@ public class MovePhase : PhaseBase
 
     private bool IsAvailable(Game _game, EDesk _desk)
     {
-        IPlayer[] players = new IPlayer[] { _game.Player, _game.Opponent };
+        IPlayer[] players = new IPlayer[] { _game.Player };
         foreach (var player in players)
         {
             if (player.Desk == _desk) { return false; }
+        }
+        return true;
+    }
+
+    private bool IsSafeSpot(Game _game, Cost _cost)
+    {
+        IPlayer[] players = new IPlayer[] { _game.Player };
+        foreach (var player in players)
+        {
+            bool isSameDesk = player.Desk == _cost.Desk;
+            bool isNextDesk = (int)player.Desk == (int)_cost.Desk + 1;
+            bool isPrevDesk = (int)player.Desk == (int)_cost.Desk - 1;
+            if (isSameDesk || isNextDesk || isPrevDesk) { return false; }
         }
         return true;
     }
@@ -234,7 +160,7 @@ public class MovePhase : PhaseBase
     {
         if (!_game.Actions.Any(x => x.Value == $"MOVE {(int)_desk}")) 
         {
-            Terminal.LogArray($"Available Actions:", _game.Actions.Select(x => x.Value));
+            Terminal.LogArray($"Available Actions", _game.Actions.Select(x => x.Value));
             throw new System.Exception($"can't move to desk {_desk}"); 
         }
         Terminal.Log($"Moving to desk {_desk}");
@@ -243,34 +169,28 @@ public class MovePhase : PhaseBase
 
     private void LogDecision(Dictionary<Application, IEnumerable<Cost>> _pursuable, KeyValuePair<Application, IEnumerable<Cost>> _bestApplicationToPursue, EDesk _bestDesk)
     {
-        Terminal.LogArray($"Pursuable Applications:", _pursuable.Select(x => x.Key.Id.ToString()));
+        Terminal.LogArray($"Pursuable Applications", _pursuable.Select(x => x.Key.Id.ToString()));
         Terminal.Log($"Best Application: {_bestApplicationToPursue.Key.Id.ToString()}");
         Terminal.Log($"Best Desk: {_bestDesk.ToString()}");
     }
 
-    private void LogPursuableCalculation(Game _game, params Dictionary<Application, IEnumerable<Cost>>[] _apps)
+    private void LogPursuableCalculation(Game _game, Dictionary<Application, IEnumerable<Cost>> _apps)
     {
-        Terminal.LogArray("Hand:", _game.Player.Hand.Select(x => x.Name.ToString()));
-        foreach (var dict in _apps)
+        Terminal.LogArray("Hand", _game.Player.Hand.Select(x => x.Name.ToString()));
+        Terminal.Log($"Total Needed After Deductions:");
+        foreach (var app in _apps)
         {
-            Terminal.Log($"Total Needed:");
-            foreach (var app in dict)
-            {
-                Terminal.LogArray($"- {app.Key.Type} {app.Key.Id}", app.Value.Select(x => $"x{x.Value} {x.Desk}"));
-            }
+            Terminal.LogArray($"- {app.Key.Type} {app.Key.Id}", app.Value.Select(x => $"x{x.Value} {x.Desk}"));
         }
     }
 
-    private void LogManaCalculation(KeyValuePair<Application, IEnumerable<Cost>> _total, Dictionary<EMana, int> _specificMana, int _wildcardMana, int _shoddyMana, List<Cost> _newCostsMinusSpecific, List<Cost> _newCostsMinusSpecificMinusWildcard, List<Cost> _newCostsMinusSpecificMinusWildcardMinusShoddy)
+    private void LogBestApplicationCalculation(Game _game, IOrderedEnumerable<KeyValuePair<Application, IEnumerable<Cost>>> _best)
     {
-        Terminal.Log($"{_total.Key.Type}: {_total.Key.Id}");
-        Terminal.LogArray("Specific Mana:", _specificMana.Select(x => $"x{x.Value} {x.Key}"));
-        Terminal.Log($"Wildcard Mana: {_wildcardMana}");
-        Terminal.Log($"Shoddy Mana: {_shoddyMana}");
-        Terminal.LogArray("Cost Total:", _total.Value.Select(x => $"x{x.Value} {x.Desk}"));
-        Terminal.LogArray("Cost Minus Specific:", _newCostsMinusSpecific.Select(x => $"x{x.Value} {x.Desk}"));
-        Terminal.LogArray("Cost Minus Wildcard:", _newCostsMinusSpecificMinusWildcard.Select(x => $"x{x.Value} {x.Desk}"));
-        Terminal.LogArray("Cost Minus Shoddy:", _newCostsMinusSpecificMinusWildcardMinusShoddy.Select(x => $"x{x.Value} {x.Desk}"));
+        Terminal.Log($"Best App:");
+        foreach (var app in _best)
+        {
+            Terminal.LogArray($"- {app.Key.Type} {app.Key.Id} (Shoddy: {app.Key.RequiredShoddyMana(_game.Player.AvailableMana())})", app.Value.Select(x => $"{x.Desk}: {IsSafeSpot(_game, x)}"));
+        }
     }
 }
 
@@ -292,7 +212,14 @@ public class ReleasePhase : OptionalPhase
 
     private bool TryGetBestApplicationToRelease(Game _game, out Application? _app)
     {
-        _app = _game.Apps.FirstOrDefault(x => x.CanRelease(_game.Actions));
+        var availableMana = _game.Player.AvailableMana();
+
+        IEnumerable<Application> releasable = _game.Apps
+            .Where(x => x.CanRelease(_game.Actions))
+            .OrderBy(x => x.RequiredShoddyMana(availableMana));
+        
+        _app = releasable.FirstOrDefault();
+        LogOrder(releasable, availableMana);
         return _app.HasValue;
     }
 
@@ -300,11 +227,120 @@ public class ReleasePhase : OptionalPhase
     {
         if (!_app.CanRelease(_game.Actions)) 
         {
-            Terminal.LogArray($"Available Actions:", _game.Actions.Select(x => x.Value));
+            Terminal.LogArray($"Available Actions", _game.Actions.Select(x => x.Value));
             throw new System.Exception($"can't release app {_app.Id}"); 
         }
         Terminal.Log($"Releasing app {_app.Id}");
         Terminal.Command($"RELEASE {_app.Id}");
+    }
+
+    private void LogOrder(IEnumerable<Application> _releasable, Dictionary<EMana, int> _availableMana)
+    {
+        Terminal.LogArray($"Required Shoddy", _releasable.Select(x => $"{x.Type} {x.Id}: {x.RequiredShoddyMana(_availableMana)}"));
+    }
+}
+
+public class PlayCardPhase : OptionalPhase
+{
+    private const int RELEASE_TECH_DEBT_SAFETY_THRESHOLD = 2;
+
+    public override EPhase Name => EPhase.PLAY_CARD;
+
+    public override void Run(Game _game)
+    {
+        if (CanSafelyReleaseApplication(_game))
+        {
+            Wait(_game);
+            return;
+        }
+
+        PlayBestCard(_game);
+    }
+
+    private bool CanSafelyReleaseApplication(Game _game)
+    {
+        var availableMana = _game.Player.AvailableMana();
+
+        IEnumerable<Application?> releasable = _game.Apps
+            .Where(x => x.CanRelease(_game.Actions))
+            .OrderBy(x => x.RequiredShoddyMana(availableMana))
+            .Cast<Application?>();
+
+        Application? best = releasable.FirstOrDefault();
+        return best.HasValue && best.Value.RequiredShoddyMana(availableMana) <= RELEASE_TECH_DEBT_SAFETY_THRESHOLD;
+    }
+
+    private void PlayBestCard(Game _game)
+    {
+        List<ECard> order = new List<ECard>()
+        {
+            ECard.TRAINING,
+            ECard.ARCHITECTURE_STUDY,
+            ECard.CODE_REVIEW,
+            ECard.REFACTORING,
+        };
+
+        ICard? card = _game.Player.Hand
+            .Where(x => order.Contains(x.Name))
+            .OrderBy(x => order.IndexOf(x.Name))
+            .FirstOrDefault();
+
+        if (card is null) 
+        { 
+            Random(_game);
+            return;
+        }
+
+        Play(_game, card);
+    }
+
+    protected void Play(Game _game, ICard _card)
+    {
+        if (!_game.Actions.Any(x => x.Value == _card.Name.ToString()))
+        {
+            Terminal.LogArray($"Available Actions", _game.Actions.Select(x => x.Value));
+            throw new System.Exception($"can't play card {_card.Name}");
+        }
+        Terminal.Command($"{_card.Name} playing...");
+    }
+}
+
+public class GiveCardPhase : PhaseBase
+{
+    public override EPhase Name => EPhase.GIVE_CARD;
+
+    public override void Run(Game _game)
+    {
+        List<ECard> order = new List<ECard>()
+        {
+            ECard.REFACTORING,
+            ECard.CODE_REVIEW,
+            ECard.ARCHITECTURE_STUDY,
+            ECard.TRAINING,
+        };
+
+        ICard? card = _game.Player.Hand
+            .Where(x => order.Contains(x.Name))
+            .OrderBy(x => order.IndexOf(x.Name))
+            .FirstOrDefault();
+
+        if (card is null)
+        {
+            Random(_game);
+            return;
+        }
+
+        Give(_game, card);
+    }
+
+    protected void Give(Game _game, ICard _card)
+    {
+        if (!_game.Actions.Any(x => x.Value == $"GIVE {_card.Id}"))
+        {
+            Terminal.LogArray($"Available Actions", _game.Actions.Select(x => x.Value));
+            throw new System.Exception($"can't give card {_card.Name}");
+        }
+        Terminal.Command($"GIVE {_card.Id} giving...");
     }
 }
 
@@ -314,7 +350,7 @@ public abstract class OptionalPhase : PhaseBase
     {
         if (!_game.Actions.Any(x => x.Value == "WAIT")) 
         {
-            Terminal.LogArray($"Available Actions:", _game.Actions.Select(x => x.Value));
+            Terminal.LogArray($"Available Actions", _game.Actions.Select(x => x.Value));
             throw new System.Exception("can't wait"); 
         }
         Terminal.Command("WAIT wait...");
@@ -331,7 +367,7 @@ public abstract class PhaseBase : IPhase
     {
         if (!_game.Actions.Any(x => x.Value == "RANDOM")) 
         {
-            Terminal.LogArray($"Available Actions:", _game.Actions.Select(x => x.Value));
+            Terminal.LogArray($"Available Actions", _game.Actions.Select(x => x.Value));
             throw new System.Exception("can't random"); 
         }
         Terminal.Command("RANDOM idk...");
@@ -367,14 +403,15 @@ public class GamePlayer : IPlayer
 {
     public IEnumerable<ICard> Hand { get; set; }
     public IEnumerable<ICard> Deck { get; set; }
-    public IEnumerable<ICard> Discard { get; set; }    
+    public IEnumerable<ICard> Discard { get; set; }
+    public IEnumerable<ICard> InPlay { get; set; }
     public IEnumerable<ICard> Automated { get; set; }
     public int PlayerPermanentDailyRoutineCards { get; set; }
     public int PlayerPermanentArchitectureStudyCards { get; set; }
     public EDesk Desk { get; set; }
     public int Score { get; set; }
-
-    public IEnumerable<ICard> Cards => Hand.Concat(Discard).Concat(Deck).ToList();
+    
+    public IEnumerable<ICard> Cards => Hand.Concat(Discard).Concat(Deck).Concat(InPlay).ToList();
 
     public GamePlayer()
     {
@@ -386,6 +423,23 @@ public class GamePlayer : IPlayer
         this.Score = 0;
         this.PlayerPermanentDailyRoutineCards = 0;
         this.PlayerPermanentArchitectureStudyCards = 0;
+    }
+
+    public Dictionary<EMana, int> AvailableMana()
+    {
+        IEnumerable<IMana> totalMana = Hand.SelectMany(x => x.GetProvidedMana());
+        Dictionary<EMana, int> sortedMana = new Dictionary<EMana, int>();
+        totalMana.ToList().ForEach(m => AddToDictionary(ref sortedMana, m));
+        return sortedMana;
+    }
+
+    private void AddToDictionary(ref Dictionary<EMana, int> sortedMana, IMana _mana)
+    {
+        if (_mana.Value > 0)
+        {
+            if (sortedMana.ContainsKey(_mana.Name)) { sortedMana[_mana.Name] += _mana.Value; }
+            else { sortedMana.Add(_mana.Name, _mana.Value); }
+        }
     }
 }
 
@@ -438,6 +492,7 @@ public static class CardFactory
 public interface ICard
 {
     ECard Name { get; }
+    int Id { get; }
     int Priority { get; }
     IEnumerable<IMana> GetProvidedMana();
 }
@@ -445,6 +500,7 @@ public interface ICard
 public struct GenericCard : ICard
 {
     public ECard Name { get; set; }
+    public int Id => (int)Name;
     public int Priority => 0;
 
     public IEnumerable<IMana> GetProvidedMana()
@@ -467,6 +523,7 @@ public struct GenericCard : ICard
 public struct BonusCard : ICard
 {
     public ECard Name => ECard.BONUS;
+    public int Id => (int)Name;
     public int Priority => 1;
 
     public IEnumerable<IMana> GetProvidedMana()
@@ -488,6 +545,7 @@ public struct BonusCard : ICard
 public struct TechDebtCard : ICard
 {
     public ECard Name => ECard.TECHNICAL_DEBT;
+    public int Id => (int)Name;
     public int Priority => 99;
 
     public IEnumerable<IMana> GetProvidedMana()
@@ -558,6 +616,101 @@ public struct Application
     {
         return _possibleActions.Select(x => x.Value).Contains($"RELEASE {Id}");
     }
+
+    public bool CanReleaseBasedOnMana(Dictionary<EMana, int> _availableMana)
+    {
+        var mana = new Dictionary<EMana, int>(_availableMana);
+        return CostExcludingAvailableMana(mana).Count() <= 0;
+    }
+
+    public int RequiredShoddyMana(Dictionary<EMana, int> _availableMana)
+    {
+        var filteredMana = new Dictionary<EMana, int>(_availableMana);
+        filteredMana.Remove(EMana.SHODDY);
+        var costs = CostExcludingAvailableMana(filteredMana);
+        return costs.Sum(x => x.Value);
+    }
+
+    public IEnumerable<Cost> CostExcludingAvailableMana(Dictionary<EMana, int> _availableMana)
+    {
+        Dictionary<EMana, int> available = new Dictionary<EMana, int>(_availableMana);
+
+        // Deduct specific mana first
+        List<Cost> newCostsMinusSpecific = DeductSpecificMana(available);
+
+        // Deduct wildcard mana next
+        List<Cost> newCostsMinusSpecificMinusWildcard = DeductMana(EMana.WILDCARD, available, newCostsMinusSpecific);
+
+        // Deduct shoddy mana next
+        List<Cost> newCostsMinusSpecificMinusWildcardMinusShoddy = DeductMana(EMana.SHODDY, available, newCostsMinusSpecificMinusWildcard);
+
+        // LogManaCalculation(_availableMana, newCostsMinusSpecific, newCostsMinusSpecificMinusWildcard, newCostsMinusSpecificMinusWildcardMinusShoddy);
+        return newCostsMinusSpecificMinusWildcardMinusShoddy;
+    }    
+
+    private List<Cost> DeductSpecificMana(Dictionary<EMana, int> _availableMana)
+    {
+        var mana = new List<Cost>();
+        var costCopy = new List<Cost>(Costs);
+        foreach (var cost in costCopy)
+        {
+            EMana key = Enum.Parse<EMana>(cost.Desk.ToString());
+            DeductManaByKey(_availableMana, mana, cost, key);
+        }
+        return mana;
+    }    
+
+    private List<Cost> DeductMana(EMana _key, Dictionary<EMana, int> _availableMana, List<Cost> _costs)
+    {
+        var mana = new List<Cost>();
+        var costCopy = new List<Cost>(_costs);
+        foreach (var cost in costCopy)
+        {
+            DeductManaByKey(_availableMana, mana, cost, _key);
+        }
+        return mana;
+    }
+
+    private void DeductManaByKey(Dictionary<EMana, int> _availableMana, List<Cost> _mana, Cost _cost, EMana _key)
+    {
+        if (_availableMana.ContainsKey(_key))
+        {
+            int toRemove = Math.Min(_availableMana[_key], _cost.Value);
+            int newCost = _cost.Value - toRemove;
+            if (newCost > 0)
+            {
+                _mana.Add(new Cost
+                {
+                    Desk = _cost.Desk,
+                    Value = newCost,
+                });
+            }
+
+            _availableMana[_key] -= toRemove;
+            if (_availableMana[_key] <= 0)
+            {
+                _availableMana.Remove(_key);
+            }
+        }
+        else
+        {
+            _mana.Add(new Cost
+            {
+                Desk = _cost.Desk,
+                Value = _cost.Value,
+            });
+        }
+    }
+
+    private void LogManaCalculation(Dictionary<EMana, int> _availableMana, List<Cost> _newCostsMinusSpecific, List<Cost> _newCostsMinusSpecificMinusWildcard, List<Cost> _newCostsMinusSpecificMinusWildcardMinusShoddy)
+    {
+        Terminal.Log($"{Type}: {Id}");
+        Terminal.LogArray("Mana", _availableMana.Select(x => $"x{x.Value} {x.Key}"));
+        Terminal.LogArray("Cost Total", Costs.Select(x => $"x{x.Value} {x.Desk}"));
+        Terminal.LogArray("Cost Minus Specific", _newCostsMinusSpecific.Select(x => $"x{x.Value} {x.Desk}"));
+        Terminal.LogArray("Cost Minus Wildcard", _newCostsMinusSpecificMinusWildcard.Select(x => $"x{x.Value} {x.Desk}"));
+        Terminal.LogArray("Cost Minus Shoddy", _newCostsMinusSpecificMinusWildcardMinusShoddy.Select(x => $"x{x.Value} {x.Desk}"));
+    }    
 }
 
 public struct Cost
@@ -686,6 +839,9 @@ public class InputReader
                 case "DISCARD":
                     _player.Discard = cards;
                     break;
+                case "PLAYED_CARDS":
+                    _player.InPlay = cards;
+                        break;
                 case "OPPONENT_CARDS":
                     _opponent.Cards = cards;
                     break;
