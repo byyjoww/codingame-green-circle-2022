@@ -83,41 +83,141 @@ public class MovePhase : PhaseBase
 
     public override void Run(Game _game)
     {
-        if (!TryGetPursuableApps(_game, out IEnumerable<Application> _pursuable))
+        var totalMana = _game.Player.Hand.SelectMany(x => x.GetProvidedMana());
+        if (!TryGetPursuableApps(_game, totalMana, out Dictionary <Application, IEnumerable<Cost>> _pursuable))
         {
             Terminal.Log($"No pursuable applications");
             Random(_game);
             return;
         }
 
-        Application bestAppToPursue = GetBestApplicationToPursue(_pursuable);
+        var bestAppToPursue = GetBestApplicationToPursue(_pursuable);
         EDesk bestDesk = GetBestDeskToMove(_game, bestAppToPursue);
         LogDecision(_pursuable, bestAppToPursue, bestDesk);
         Move(_game, bestDesk);
     }
 
-    private bool TryGetPursuableApps(Game _game, out IEnumerable<Application> _pursuable)
+    private bool TryGetPursuableApps(Game _game, IEnumerable<IMana> _mana, out Dictionary<Application, IEnumerable<Cost>> _pursuable)
     {
         // If we can already release that app, we dont need to pursue it
         // TODO: check if we can improve the release by using good skills instead of shoddy skills
-        _pursuable = _game.Apps
+        var apps = _game.Apps
             .Where(x => !x.CanRelease(_game.Actions))
             .Where(x => x.Costs.Any(x => IsAvailable(_game, x.Desk)))
-            .ToList();
+            .ToDictionary(x => x, y => y.Costs);
+
+        _pursuable = apps
+            .ToDictionary(x => x.Key, y => ExcludeAvailableMana(y, _mana))
+            .Where(x => x.Value.Count() > 0)
+            .Where(x => x.Value.Any(x => IsAvailable(_game, x.Desk)))
+            .ToDictionary(x => x.Key, y => y.Value);
+
+        LogPursuableCalculation(_game, apps, _pursuable);
         return _pursuable.Count() > 0;
     }
 
-    private Application GetBestApplicationToPursue(IEnumerable<Application> _pursuable)
+    private IEnumerable<Cost> ExcludeAvailableMana(KeyValuePair<Application, IEnumerable<Cost>> _total, IEnumerable<IMana> _mana)
+    {
+        Dictionary<EMana, int> specificMana = new Dictionary<EMana, int>();
+        void AddToDictionary(IMana _mana)
+        {
+            if (_mana.Value > 0)
+            {
+                if (specificMana.ContainsKey(_mana.Name)) { specificMana[_mana.Name] += _mana.Value; }
+                else { specificMana.Add(_mana.Name, _mana.Value); }
+            }
+        }
+        _mana.Where(x => x is Mana).ToList().ForEach(x => AddToDictionary(x));
+        int wildcardMana = _mana.Where(x => x is WildcardMana).Sum(x => x.Value);        
+        int shoddyMana = _mana.Where(x => x is ShoddyMana).Sum(x => x.Value);
+
+        var loggableSpecificMana = new Dictionary<EMana, int>(specificMana);
+        int loggableWildcardMana = wildcardMana;
+        int loggableShoddyMana = shoddyMana;
+
+        // Deduct specific mana first
+        var newCostsMinusSpecific = new List<Cost>();
+        foreach (var cost in _total.Value)
+        {
+            var m = Enum.Parse<EMana>(cost.Desk.ToString());
+            if (specificMana.ContainsKey(m))
+            {
+                int toRemove = Math.Min(specificMana[m], cost.Value);
+                int newCost = cost.Value - toRemove;
+                if (newCost > 0) 
+                {
+                    newCostsMinusSpecific.Add(new Cost 
+                    {
+                        Desk = cost.Desk,
+                        Value = newCost,
+                    });
+                }
+
+                specificMana[m] -= toRemove;
+                if (specificMana[m] <= 0)
+                {
+                    specificMana.Remove(m);
+                }
+            }
+            else
+            {
+                newCostsMinusSpecific.Add(new Cost
+                {
+                    Desk = cost.Desk,
+                    Value = cost.Value,
+                });
+            }
+        }
+
+        // Deduct wildcard mana next
+        var newCostsMinusSpecificMinusWildcard = new List<Cost>();  
+        foreach (var cost in newCostsMinusSpecific)
+        {
+            int toRemove = Math.Min(wildcardMana, cost.Value);
+            int newCost = cost.Value - toRemove;
+            if (newCost > 0)
+            {
+                newCostsMinusSpecificMinusWildcard.Add(new Cost
+                {
+                    Desk = cost.Desk,
+                    Value = newCost,
+                });
+            }
+            wildcardMana -= toRemove;
+        }
+
+        // Deduct shoddy mana next
+        var newCostsMinusSpecificMinusWildcardMinusShoddy = new List<Cost>();
+        foreach (var cost in newCostsMinusSpecificMinusWildcard)
+        {
+            int toRemove = Math.Min(shoddyMana, cost.Value);
+            int newCost = cost.Value - toRemove;
+            if (newCost > 0)
+            {
+                newCostsMinusSpecificMinusWildcardMinusShoddy.Add(new Cost
+                {
+                    Desk = cost.Desk,
+                    Value = newCost,
+                });
+            }
+            shoddyMana -= toRemove;
+        }
+
+        // LogManaCalculation(_total, loggableSpecificMana, loggableWildcardMana, loggableShoddyMana, newCostsMinusSpecific, newCostsMinusSpecificMinusWildcard, newCostsMinusSpecificMinusWildcardMinusShoddy);
+        return newCostsMinusSpecificMinusWildcardMinusShoddy;
+    }    
+
+    private KeyValuePair<Application, IEnumerable<Cost>> GetBestApplicationToPursue(Dictionary<Application, IEnumerable<Cost>> _pursuable)
     {
         return _pursuable.First();
     }
 
-    private EDesk GetBestDeskToMove(Game _game, Application _bestApplicationToPursue)
+    private EDesk GetBestDeskToMove(Game _game, KeyValuePair<Application, IEnumerable<Cost>> _bestApplicationToPursue)
     {
-        return _bestApplicationToPursue.Costs
-            .Where(x => IsAvailable(_game, x.Desk))
-            .First()
-            .Desk;
+        return _bestApplicationToPursue.Value
+            .Select(x => x.Desk)
+            .Where(x => IsAvailable(_game, x))
+            .First();
     }
 
     private bool IsAvailable(Game _game, EDesk _desk)
@@ -141,11 +241,36 @@ public class MovePhase : PhaseBase
         Terminal.Command($"MOVE {(int)_desk}");
     }
 
-    private void LogDecision(IEnumerable<Application> _pursuable, Application _bestApplicationToPursue, EDesk _bestDesk)
+    private void LogDecision(Dictionary<Application, IEnumerable<Cost>> _pursuable, KeyValuePair<Application, IEnumerable<Cost>> _bestApplicationToPursue, EDesk _bestDesk)
     {
-        Terminal.LogArray($"Pursuable Applications:", _pursuable.Select(x => x.Id.ToString()));
-        Terminal.Log($"Best Application: {_bestApplicationToPursue.Id.ToString()}");
+        Terminal.LogArray($"Pursuable Applications:", _pursuable.Select(x => x.Key.Id.ToString()));
+        Terminal.Log($"Best Application: {_bestApplicationToPursue.Key.Id.ToString()}");
         Terminal.Log($"Best Desk: {_bestDesk.ToString()}");
+    }
+
+    private void LogPursuableCalculation(Game _game, params Dictionary<Application, IEnumerable<Cost>>[] _apps)
+    {
+        Terminal.LogArray("Hand:", _game.Player.Hand.Select(x => x.Name.ToString()));
+        foreach (var dict in _apps)
+        {
+            Terminal.Log($"Total Needed:");
+            foreach (var app in dict)
+            {
+                Terminal.LogArray($"- {app.Key.Type} {app.Key.Id}", app.Value.Select(x => $"x{x.Value} {x.Desk}"));
+            }
+        }
+    }
+
+    private void LogManaCalculation(KeyValuePair<Application, IEnumerable<Cost>> _total, Dictionary<EMana, int> _specificMana, int _wildcardMana, int _shoddyMana, List<Cost> _newCostsMinusSpecific, List<Cost> _newCostsMinusSpecificMinusWildcard, List<Cost> _newCostsMinusSpecificMinusWildcardMinusShoddy)
+    {
+        Terminal.Log($"{_total.Key.Type}: {_total.Key.Id}");
+        Terminal.LogArray("Specific Mana:", _specificMana.Select(x => $"x{x.Value} {x.Key}"));
+        Terminal.Log($"Wildcard Mana: {_wildcardMana}");
+        Terminal.Log($"Shoddy Mana: {_shoddyMana}");
+        Terminal.LogArray("Cost Total:", _total.Value.Select(x => $"x{x.Value} {x.Desk}"));
+        Terminal.LogArray("Cost Minus Specific:", _newCostsMinusSpecific.Select(x => $"x{x.Value} {x.Desk}"));
+        Terminal.LogArray("Cost Minus Wildcard:", _newCostsMinusSpecificMinusWildcard.Select(x => $"x{x.Value} {x.Desk}"));
+        Terminal.LogArray("Cost Minus Shoddy:", _newCostsMinusSpecificMinusWildcardMinusShoddy.Select(x => $"x{x.Value} {x.Desk}"));
     }
 }
 
@@ -230,8 +355,8 @@ public interface IPhase
 
 public interface IPlayer
 {
-    IEnumerable<Card> Cards { get; }
-    IEnumerable<Card> Automated { get; }
+    IEnumerable<ICard> Cards { get; }
+    IEnumerable<ICard> Automated { get; }
     int PlayerPermanentDailyRoutineCards { get; set; }
     int PlayerPermanentArchitectureStudyCards { get; set; }
     EDesk Desk { get; set; }
@@ -240,23 +365,23 @@ public interface IPlayer
 
 public class GamePlayer : IPlayer
 {
-    public IEnumerable<Card> Hand { get; set; }
-    public IEnumerable<Card> Deck { get; set; }
-    public IEnumerable<Card> Discard { get; set; }    
-    public IEnumerable<Card> Automated { get; set; }
+    public IEnumerable<ICard> Hand { get; set; }
+    public IEnumerable<ICard> Deck { get; set; }
+    public IEnumerable<ICard> Discard { get; set; }    
+    public IEnumerable<ICard> Automated { get; set; }
     public int PlayerPermanentDailyRoutineCards { get; set; }
     public int PlayerPermanentArchitectureStudyCards { get; set; }
     public EDesk Desk { get; set; }
     public int Score { get; set; }
 
-    public IEnumerable<Card> Cards => Hand.Concat(Discard).Concat(Deck).ToList();
+    public IEnumerable<ICard> Cards => Hand.Concat(Discard).Concat(Deck).ToList();
 
     public GamePlayer()
     {
-        this.Hand = new Card[0];
-        this.Deck = new Card[0];
-        this.Discard = new Card[0];
-        this.Automated = new Card[0];
+        this.Hand = new ICard[0];
+        this.Deck = new ICard[0];
+        this.Discard = new ICard[0];
+        this.Automated = new ICard[0];
         this.Desk = (EDesk)(-1);
         this.Score = 0;
         this.PlayerPermanentDailyRoutineCards = 0;
@@ -266,8 +391,8 @@ public class GamePlayer : IPlayer
 
 public class GameOpponent : IPlayer
 {
-    public IEnumerable<Card> Cards { get; set; }
-    public IEnumerable<Card> Automated { get; set; }
+    public IEnumerable<ICard> Cards { get; set; }
+    public IEnumerable<ICard> Automated { get; set; }
     public int PlayerPermanentDailyRoutineCards { get; set; }
     public int PlayerPermanentArchitectureStudyCards { get; set; }
     public EDesk Desk { get; set; }
@@ -275,8 +400,8 @@ public class GameOpponent : IPlayer
 
     public GameOpponent()
     {
-        this.Cards = new List<Card>();
-        this.Automated = new Card[0];
+        this.Cards = new List<ICard>();
+        this.Automated = new ICard[0];
         this.Desk = (EDesk)(-1);
         this.Score = 0;
         this.PlayerPermanentDailyRoutineCards = 0;
@@ -284,33 +409,143 @@ public class GameOpponent : IPlayer
     }
 }
 
-public struct Card
+public static class CardFactory
 {
-    public ECard Name { get; set; }
-
-    public enum ECard
+    public static IEnumerable<ICard> Parse(ECard _card, string _count)
     {
-        TRAINING = 0,
-        CODING = 1,
-        DAILY_ROUTINE = 2,
-        TASK_PRIORITIZATION = 3,
-        ARCHITECTURE_STUDY = 4,
-        CONTINUOUS_DELIVERY = 5,
-        CODE_REVIEW = 6,
-        REFACTORING = 7,
-        BONUS = 8,
-        TECHNICAL_DEBT = 9,
-    }
-
-    public static IEnumerable<Card> Parse(ECard _desk, string _count)
-    {
-        var cards = new List<Card>();
+        var cards = new List<ICard>();
         for (int i = 0; i < int.Parse(_count); i++)
         {
-            cards.Add(new Card { Name = _desk });
+            ICard card;
+            switch (_card)
+            {
+                case ECard.BONUS: 
+                    card = new BonusCard(); 
+                    break;
+                case ECard.TECHNICAL_DEBT: 
+                    card = new TechDebtCard(); 
+                    break;
+                default: 
+                    card = new GenericCard { Name = _card }; 
+                    break;
+            }
+            cards.Add(card);
         }
         return cards;
     }
+}
+
+public interface ICard
+{
+    ECard Name { get; }
+    int Priority { get; }
+    IEnumerable<IMana> GetProvidedMana();
+}
+
+public struct GenericCard : ICard
+{
+    public ECard Name { get; set; }
+    public int Priority => 0;
+
+    public IEnumerable<IMana> GetProvidedMana()
+    {
+        return new IMana[]
+        {
+            new Mana 
+            {
+                Name = Enum.Parse<EMana>(Name.ToString()),
+                Value = 2,
+            },
+            new ShoddyMana 
+            {
+                Value = 2,
+            },
+        };
+    }
+}
+
+public struct BonusCard : ICard
+{
+    public ECard Name => ECard.BONUS;
+    public int Priority => 1;
+
+    public IEnumerable<IMana> GetProvidedMana()
+    {
+        return new IMana[] 
+        {
+            new WildcardMana 
+            {
+                Value = 1,
+            },
+            new ShoddyMana 
+            { 
+                Value = 1,
+            },
+        };
+    }
+}
+
+public struct TechDebtCard : ICard
+{
+    public ECard Name => ECard.TECHNICAL_DEBT;
+    public int Priority => 99;
+
+    public IEnumerable<IMana> GetProvidedMana()
+    {
+        return new IMana[0];
+    }
+}
+
+public interface IMana
+{
+    EMana Name { get; }
+    int Value { get; }
+}
+
+public struct Mana : IMana
+{
+    public EMana Name { get; set; }
+    public int Value { get; set; }
+}
+
+public struct WildcardMana : IMana
+{
+    public EMana Name => EMana.WILDCARD;
+    public int Value { get; set; }
+}
+
+public struct ShoddyMana : IMana
+{
+    public EMana Name => EMana.SHODDY;
+    public int Value { get; set; }
+}
+
+public enum EMana
+{
+    TRAINING = 0,
+    CODING = 1,
+    DAILY_ROUTINE = 2,
+    TASK_PRIORITIZATION = 3,
+    ARCHITECTURE_STUDY = 4,
+    CONTINUOUS_DELIVERY = 5,
+    CODE_REVIEW = 6,
+    REFACTORING = 7,
+    WILDCARD = 8,
+    SHODDY = 9,
+}
+
+public enum ECard
+{
+    TRAINING = 0,
+    CODING = 1,
+    DAILY_ROUTINE = 2,
+    TASK_PRIORITIZATION = 3,
+    ARCHITECTURE_STUDY = 4,
+    CONTINUOUS_DELIVERY = 5,
+    CODE_REVIEW = 6,
+    REFACTORING = 7,
+    BONUS = 8,
+    TECHNICAL_DEBT = 9,
 }
 
 public struct Application
@@ -329,7 +564,10 @@ public struct Cost
 {
     public EDesk Desk { get; set; }
     public int Value { get; set; }
+}
 
+public static class CostFactory
+{
     public static IEnumerable<Cost> Parse(EDesk _desk, string _count)
     {
         int costNum = int.Parse(_count);
@@ -386,14 +624,14 @@ public class InputReader
         {
             inputs = Terminal.Read().Split(' ');
             List<Cost> costs = new List<Cost>();
-            costs.AddRange(Cost.Parse(EDesk.TRAINING, inputs[2]));
-            costs.AddRange(Cost.Parse(EDesk.CODING, inputs[3]));
-            costs.AddRange(Cost.Parse(EDesk.DAILY_ROUTINE, inputs[4]));
-            costs.AddRange(Cost.Parse(EDesk.TASK_PRIORITIZATION, inputs[5]));
-            costs.AddRange(Cost.Parse(EDesk.ARCHITECTURE_STUDY, inputs[6]));
-            costs.AddRange(Cost.Parse(EDesk.CONTINUOUS_DELIVERY, inputs[7]));
-            costs.AddRange(Cost.Parse(EDesk.CODE_REVIEW, inputs[8]));
-            costs.AddRange(Cost.Parse(EDesk.REFACTORING, inputs[9]));
+            costs.AddRange(CostFactory.Parse(EDesk.TRAINING, inputs[2]));
+            costs.AddRange(CostFactory.Parse(EDesk.CODING, inputs[3]));
+            costs.AddRange(CostFactory.Parse(EDesk.DAILY_ROUTINE, inputs[4]));
+            costs.AddRange(CostFactory.Parse(EDesk.TASK_PRIORITIZATION, inputs[5]));
+            costs.AddRange(CostFactory.Parse(EDesk.ARCHITECTURE_STUDY, inputs[6]));
+            costs.AddRange(CostFactory.Parse(EDesk.CONTINUOUS_DELIVERY, inputs[7]));
+            costs.AddRange(CostFactory.Parse(EDesk.CODE_REVIEW, inputs[8]));
+            costs.AddRange(CostFactory.Parse(EDesk.REFACTORING, inputs[9]));
 
             Application app = new Application
             {
@@ -425,17 +663,17 @@ public class InputReader
             inputs = Terminal.Read().Split(' ');
             string cardsLocation = inputs[0];
 
-            List<Card> cards = new List<Card>();
-            cards.AddRange(Card.Parse(Card.ECard.TRAINING, inputs[1]));
-            cards.AddRange(Card.Parse(Card.ECard.CODING, inputs[2]));
-            cards.AddRange(Card.Parse(Card.ECard.DAILY_ROUTINE, inputs[3]));
-            cards.AddRange(Card.Parse(Card.ECard.TASK_PRIORITIZATION, inputs[4]));
-            cards.AddRange(Card.Parse(Card.ECard.ARCHITECTURE_STUDY, inputs[5]));
-            cards.AddRange(Card.Parse(Card.ECard.CONTINUOUS_DELIVERY, inputs[6]));
-            cards.AddRange(Card.Parse(Card.ECard.CODE_REVIEW, inputs[7]));
-            cards.AddRange(Card.Parse(Card.ECard.REFACTORING, inputs[8]));
-            cards.AddRange(Card.Parse(Card.ECard.BONUS, inputs[9]));
-            cards.AddRange(Card.Parse(Card.ECard.TECHNICAL_DEBT, inputs[10]));
+            List<ICard> cards = new List<ICard>();
+            cards.AddRange(CardFactory.Parse(ECard.TRAINING, inputs[1]));
+            cards.AddRange(CardFactory.Parse(ECard.CODING, inputs[2]));
+            cards.AddRange(CardFactory.Parse(ECard.DAILY_ROUTINE, inputs[3]));
+            cards.AddRange(CardFactory.Parse(ECard.TASK_PRIORITIZATION, inputs[4]));
+            cards.AddRange(CardFactory.Parse(ECard.ARCHITECTURE_STUDY, inputs[5]));
+            cards.AddRange(CardFactory.Parse(ECard.CONTINUOUS_DELIVERY, inputs[6]));
+            cards.AddRange(CardFactory.Parse(ECard.CODE_REVIEW, inputs[7]));
+            cards.AddRange(CardFactory.Parse(ECard.REFACTORING, inputs[8]));
+            cards.AddRange(CardFactory.Parse(ECard.BONUS, inputs[9]));
+            cards.AddRange(CardFactory.Parse(ECard.TECHNICAL_DEBT, inputs[10]));
 
             switch (cardsLocation)
             {
